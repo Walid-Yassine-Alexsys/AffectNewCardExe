@@ -1,10 +1,8 @@
-﻿// .NET 8 Console/Minimal Program – RFID/Moxa → HEX → SignalR
-// No DB, no HTTP, no REST. Only read HEX and publish.
-// TestMode = manual HEX typing. Normal mode = TCP RFID reading.
+﻿// .NET 8 Console – RFID/Moxa → RAW DATA → SignalR
+// No DB, no HTTP, only read raw ASCII and publish.
 
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Azure.SignalR.Management;
-using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -22,12 +20,11 @@ using System.Text.RegularExpressions;
 public sealed class AppOptions
 {
     public bool TestMode { get; set; } = false;
-    public int HttpPort { get; set; } = 5003; // unused but kept for config simplicity
 }
 
 public sealed class RfidOptions
 {
-    public string Host { get; set; } = "10.10.10.10";
+    public string Host { get; set; } = "10.116.136.22";
     public string? FallbackHost { get; set; } = null;
     public int Port { get; set; } = 4001;
     public int ReconnectDelayMs { get; set; } = 2000;
@@ -39,7 +36,7 @@ public sealed class SignalROptions
 {
     public string ConnectionString { get; set; } = default!;
     public string HubName { get; set; } = "read_new_card_hub";
-    public string MethodName { get; set; } = "ReceiveHex";
+    public string MethodName { get; set; } = "ReceiveHex"; // name unchanged
 }
 
 public sealed class DeviceOptions
@@ -67,7 +64,7 @@ public static class DeviceIdentity
 
     public static string GetOrCreateDeviceId()
     {
-        if (_cachedDeviceId is not null) return _cachedDeviceId;
+        if (_cachedDeviceId != null) return _cachedDeviceId;
 
         if (File.Exists(DeviceIdFile))
         {
@@ -82,7 +79,7 @@ public static class DeviceIdentity
 
     public static string GetOrCreateDeviceName(string? configuredName = null)
     {
-        if (_cachedDeviceName is not null) return _cachedDeviceName;
+        if (_cachedDeviceName != null) return _cachedDeviceName;
 
         if (File.Exists(DeviceNameFile))
         {
@@ -103,34 +100,50 @@ public static class DeviceIdentity
 
 #endregion
 
-#region Tag Args
+#region Tag Event
+
 public sealed class TagEventArgs : EventArgs
 {
-    public required string Hex { get; init; }
+    public required string Raw { get; init; }
     public required DateTime Timestamp { get; init; }
 }
+
 #endregion
 
-#region RFID Reader (no DB)
+#region RFID Reader
 
 public sealed class RfidReaderService : IHostedService
 {
     private readonly ILogger<RfidReaderService> _log;
     private readonly RfidOptions _opt;
+    private readonly AppOptions _app;
     private CancellationTokenSource? _cts;
 
     public event EventHandler<TagEventArgs>? TagReceived;
 
-    public RfidReaderService(ILogger<RfidReaderService> log, IOptions<RfidOptions> opt)
+    public RfidReaderService(
+        ILogger<RfidReaderService> log,
+        IOptions<RfidOptions> opt,
+        IOptions<AppOptions> appOpt)
     {
         _log = log;
         _opt = opt.Value;
+        _app = appOpt.Value;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _ = Task.Run(() => RunAsync(_cts.Token));
+        if (!_app.TestMode)
+        {
+            _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _ = Task.Run(() => RunAsync(_cts.Token));
+            Console.WriteLine("[MODE] REAL MODE → Connecting to RFID reader...");
+        }
+        else
+        {
+            Console.WriteLine("[MODE] TEST MODE → Manual RAW input only. No RFID connection.");
+        }
+
         return Task.CompletedTask;
     }
 
@@ -149,7 +162,7 @@ public sealed class RfidReaderService : IHostedService
                 TcpClient? tcp = null;
                 string[] hosts = { _opt.Host, _opt.FallbackHost ?? "" };
 
-                Console.WriteLine($"\n[RFID] Trying to connect to primary {_opt.Host}:{_opt.Port} ...");
+                Console.WriteLine($"\n[RFID] Trying primary {_opt.Host}:{_opt.Port} ...");
 
                 foreach (var host in hosts)
                 {
@@ -158,57 +171,52 @@ public sealed class RfidReaderService : IHostedService
                     try
                     {
                         tcp = new TcpClient();
-
                         var connectTask = tcp.ConnectAsync(host, _opt.Port);
-                        var finished = await Task.WhenAny(connectTask, Task.Delay(2000, ct));
+                        var completed = await Task.WhenAny(connectTask, Task.Delay(2000, ct));
 
-                        if (finished == connectTask)
+                        if (completed == connectTask)
                         {
                             await connectTask;
                             Console.WriteLine($"[RFID] CONNECTED to {host}:{_opt.Port}");
-                            _log.LogInformation("RFID Connected on {host}:{port}", host, _opt.Port);
                             break;
                         }
                         else
                         {
-                            Console.WriteLine($"[RFID] Timeout connecting to {host}:{_opt.Port}");
-                            _log.LogWarning("Timeout connecting to {host}", host);
+                            Console.WriteLine($"[RFID] TIMEOUT connecting to {host}:{_opt.Port}");
                         }
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[RFID] ERROR connecting to {host}:{_opt.Port} -> {ex.Message}");
-                        _log.LogWarning("Cannot connect to {host}", host);
+                        Console.WriteLine($"[RFID] ERROR connecting to {host}:{_opt.Port} → {ex.Message}");
                     }
 
-                    // If failed primary and fallback exists:
                     if (host == _opt.Host && !string.IsNullOrWhiteSpace(_opt.FallbackHost))
                         Console.WriteLine($"[RFID] Trying fallback {_opt.FallbackHost}:{_opt.Port} ...");
                 }
 
                 if (tcp == null || !tcp.Connected)
                 {
-                    Console.WriteLine("[RFID] BOTH primary and fallback connections FAILED. Retrying...");
+                    Console.WriteLine("[RFID] FAILED both primary and fallback → retrying...");
                     await Task.Delay(_opt.ReconnectDelayMs, ct);
                     continue;
                 }
 
-
-               
                 using var stream = tcp.GetStream();
                 var buffer = ArrayPool<byte>.Shared.Rent(_opt.ReadBufferBytes);
                 var sb = new StringBuilder();
+
+                Console.WriteLine("[RFID] Ready, waiting for tags...");
 
                 while (!ct.IsCancellationRequested)
                 {
                     if (!stream.DataAvailable)
                     {
-                        await Task.Delay(5, ct);
+                        await Task.Delay(10, ct);
                         continue;
                     }
 
                     int n = await stream.ReadAsync(buffer.AsMemory(0, _opt.ReadBufferBytes), ct);
-                    if (n <= 0) throw new IOException("RFID closed");
+                    if (n <= 0) throw new IOException("RFID disconnected");
 
                     var chunk = Encoding.ASCII.GetString(buffer, 0, n);
                     sb.Append(chunk);
@@ -218,21 +226,19 @@ public sealed class RfidReaderService : IHostedService
                         var txt = Strip(line);
                         if (string.IsNullOrWhiteSpace(txt)) continue;
 
-                        var hex = ToHex(txt);
-
                         TagReceived?.Invoke(this, new TagEventArgs
                         {
-                            Hex = hex,
+                            Raw = txt,
                             Timestamp = DateTime.Now
                         });
 
-                        _log.LogInformation("HEX={hex}", hex);
+                        Console.WriteLine($"[TAG] RAW = {txt}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "RFID error");
+                Console.WriteLine($"[RFID] ERROR → {ex.Message}");
                 await Task.Delay(_opt.ReconnectDelayMs, ct);
             }
         }
@@ -242,8 +248,8 @@ public sealed class RfidReaderService : IHostedService
     {
         if (string.IsNullOrEmpty(regex))
         {
-            var text = sb.ToString();
-            var parts = text.Split('\n');
+            var txt = sb.ToString();
+            var parts = txt.Split('\n');
             for (int i = 0; i < parts.Length - 1; i++)
                 yield return parts[i];
 
@@ -266,23 +272,13 @@ public sealed class RfidReaderService : IHostedService
     }
 
     private static string Strip(string s)
-        => new string(s.Where(ch => !char.IsControl(ch)).ToArray());
-
-    private static string ToHex(string ascii)
-    {
-        var b = Encoding.ASCII.GetBytes(ascii);
-        var sb = new StringBuilder();
-
-        foreach (var x in b)
-            sb.Append(x.ToString("X2"));
-
-        return sb.ToString();
-    }
+        => new string(s.Where(c => !char.IsControl(c)).ToArray());
 }
 
 #endregion
 
 #region SignalR Publisher
+
 public sealed class HexPublisher : IHostedService
 {
     private readonly ILogger<HexPublisher> _log;
@@ -305,7 +301,7 @@ public sealed class HexPublisher : IHostedService
         _dev = dev.Value;
 
         _deviceId = DeviceIdentity.GetOrCreateDeviceId();
-        _deviceName = DeviceIdentity.GetOrCreateDeviceName(dev.Value.Name);
+        _deviceName = DeviceIdentity.GetOrCreateDeviceName(_dev.Name);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -315,12 +311,12 @@ public sealed class HexPublisher : IHostedService
             .BuildServiceManager();
 
         _hub = await _mgr.CreateHubContextAsync(_opt.HubName, cancellationToken);
-        _log.LogInformation("Connected to SignalR hub {hub}", _opt.HubName);
+        Console.WriteLine($"[SignalR] Connected to hub '{_opt.HubName}'");
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-    public async Task SendHexAsync(string hex)
+    public async Task SendRawAsync(string hex)
     {
         if (_hub == null) return;
 
@@ -333,17 +329,16 @@ public sealed class HexPublisher : IHostedService
         };
 
         await _hub.Clients.All.SendAsync(_opt.MethodName, payload);
-        _log.LogInformation("Sent: {p}", JsonSerializer.Serialize(payload));
+        Console.WriteLine($"[SEND] RAW → {hex}");
     }
 }
 
 #endregion
 
-#region Resolver
+#region Resolver (RFID → SignalR)
 
 public sealed class RfidToSignalRService : IHostedService
 {
-    private readonly ILogger<RfidToSignalRService> _log;
     private readonly AppOptions _app;
     private readonly RfidReaderService _reader;
     private readonly HexPublisher _publisher;
@@ -351,12 +346,10 @@ public sealed class RfidToSignalRService : IHostedService
     private CancellationTokenSource? _cts;
 
     public RfidToSignalRService(
-        ILogger<RfidToSignalRService> log,
         IOptions<AppOptions> app,
         RfidReaderService reader,
         HexPublisher publisher)
     {
-        _log = log;
         _app = app.Value;
         _reader = reader;
         _publisher = publisher;
@@ -367,13 +360,11 @@ public sealed class RfidToSignalRService : IHostedService
         if (_app.TestMode)
         {
             _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _ = Task.Run(() => ManualLoopAsync(_cts.Token));
-            _log.LogWarning("TEST MODE: type HEX and press ENTER");
+            _ = Task.Run(() => ManualInputLoopAsync(_cts.Token));
         }
         else
         {
             _reader.TagReceived += OnTag;
-            _log.LogInformation("Listening for RFID...");
         }
 
         return Task.CompletedTask;
@@ -381,29 +372,29 @@ public sealed class RfidToSignalRService : IHostedService
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
-        if (_app.TestMode) _cts?.Cancel();
-        else _reader.TagReceived -= OnTag;
+        if (_app.TestMode)
+            _cts?.Cancel();
+        else
+            _reader.TagReceived -= OnTag;
 
         return Task.CompletedTask;
     }
 
-    private async Task ManualLoopAsync(CancellationToken ct)
+    private async void OnTag(object? sender, TagEventArgs e)
+    {
+        await _publisher.SendRawAsync(e.Raw);
+    }
+
+    private async Task ManualInputLoopAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            Console.Write("\nHEX: ");
-            var line = Console.ReadLine();
+            Console.Write("\nRAW: ");
+            var input = Console.ReadLine();
 
-            if (string.IsNullOrWhiteSpace(line))
-                continue;
-
-            await _publisher.SendHexAsync(line.Trim());
+            if (!string.IsNullOrWhiteSpace(input))
+                await _publisher.SendRawAsync(input.Trim());
         }
-    }
-
-    private async void OnTag(object? s, TagEventArgs e)
-    {
-        await _publisher.SendHexAsync(e.Hex);
     }
 }
 
@@ -428,26 +419,24 @@ static class ConfigLoader
             return cb.Build();
         }
 
-        // EMBEDDED
         var asm = Assembly.GetExecutingAssembly();
-        var resourceName = asm.GetManifestResourceNames()
-            .FirstOrDefault(n => n.EndsWith("appsettings.json", StringComparison.OrdinalIgnoreCase));
+        var name = asm.GetManifestResourceNames()
+            .FirstOrDefault(n => n.EndsWith("appsettings.json"));
 
-        if (resourceName == null)
+        if (name == null)
             throw new Exception("Embedded appsettings.json not found.");
 
-        using var stream = asm.GetManifestResourceStream(resourceName)
-                      ?? throw new Exception("appsettings.json stream is null.");
+        using var stream = asm.GetManifestResourceStream(name)
+            ?? throw new Exception("Embedded appsettings.json stream null.");
 
         cb.AddJsonStream(stream);
         return cb.Build();
     }
 }
 
-
 #endregion
 
-#region Program Main
+#region Main
 
 public class Program
 {
@@ -456,7 +445,6 @@ public class Program
         var cfg = ConfigLoader.Load();
 
         var builder = Host.CreateApplicationBuilder(args);
-
         builder.Configuration.AddConfiguration(cfg);
 
         builder.Services.Configure<AppOptions>(builder.Configuration.GetSection("App"));
@@ -473,16 +461,19 @@ public class Program
         builder.Services.AddHostedService(sp => sp.GetRequiredService<RfidToSignalRService>());
 
         builder.Logging.ClearProviders();
-        builder.Logging.AddSimpleConsole(o => { o.TimestampFormat = "HH:mm:ss "; o.SingleLine = true; });
+        builder.Logging.AddSimpleConsole(o =>
+        {
+            o.TimestampFormat = "HH:mm:ss ";
+            o.SingleLine = true;
+        });
 
         var app = builder.Build();
 
         Console.WriteLine("===============================================");
-        Console.WriteLine("  RFID → HEX → SignalR");
+        Console.WriteLine("  RFID → RAW → SignalR");
         Console.WriteLine("  TestMode = " + (cfg.GetValue<bool>("App:TestMode") ? "YES" : "NO"));
-        Console.WriteLine("  Device Files:");
-        Console.WriteLine("     " + DeviceIdentity.GetOrCreateDeviceId());
-        Console.WriteLine("     " + DeviceIdentity.GetOrCreateDeviceName());
+        Console.WriteLine("  DeviceId  : " + DeviceIdentity.GetOrCreateDeviceId());
+        Console.WriteLine("  DeviceName: " + DeviceIdentity.GetOrCreateDeviceName());
         Console.WriteLine("===============================================");
 
         await app.RunAsync();
