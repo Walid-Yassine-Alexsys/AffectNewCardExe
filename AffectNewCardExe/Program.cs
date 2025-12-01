@@ -38,7 +38,7 @@ public sealed class RfidOptions
 public sealed class SignalROptions
 {
     public string ConnectionString { get; set; } = default!;
-    public string HubName { get; set; } = "rfid_hub";
+    public string HubName { get; set; } = "read_new_card_hub";
     public string MethodName { get; set; } = "ReceiveHex";
 }
 
