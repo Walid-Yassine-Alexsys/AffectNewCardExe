@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36518.9 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AffectNewCardExe", "AffectNewCardExe\AffectNewCardExe.csproj", "{3199BA21-5CDA-4285-9C1B-92F20271244D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3199BA21-5CDA-4285-9C1B-92F20271244D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3199BA21-5CDA-4285-9C1B-92F20271244D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3199BA21-5CDA-4285-9C1B-92F20271244D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3199BA21-5CDA-4285-9C1B-92F20271244D}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {500F06AA-F63F-4C80-9761-399BB7409753}
+	EndGlobalSection
+EndGlobal
